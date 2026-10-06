@@ -1,10 +1,12 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.context_builder import build_drug_context
 from app.graph_queries import (
     get_disease_knowledge,
     get_drug_knowledge,
+    get_graph_data,
 )
 from app.llm import generate_answer
 
@@ -15,6 +17,18 @@ app = FastAPI(
     version="1.0.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 def root():
@@ -57,7 +71,17 @@ def drug_knowledge(disease_id: str, drug_name: str):
         "drug": drug_name,
         "results": data
     }
+@app.get("/api/graph/{disease_id}")
+def graph_data(disease_id: str):
+    data = get_graph_data(disease_id)
 
+    if not data["nodes"]:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No graph data found for disease: {disease_id}"
+        )
+
+    return data
 
 class AskRequest(BaseModel):
     question: str
