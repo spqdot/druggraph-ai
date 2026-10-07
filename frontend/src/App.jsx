@@ -7,6 +7,7 @@ function App() {
   const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [selectedNode, setSelectedNode] = useState(null);
   const [graphData, setGraphData] = useState({
     nodes: [],
     links: [],
@@ -161,41 +162,79 @@ function App() {
             <div className="graph-placeholder">
               {graphData.nodes.length > 0 ? (
                 <ForceGraph2D
-                    graphData={graphData}
-                    width={520}
-                    height={300}
-                    nodeLabel={(node) =>
-                      `${node.type}: ${node.label || node.id}`
+                  graphData={graphData}
+                  width={520}
+                  height={300}
+
+                  backgroundColor="#ffffff"
+
+                  nodeLabel={(node) =>
+                    `${node.type}: ${node.label || node.id}`
+                  }
+
+                  nodeAutoColorBy="type"
+
+                  nodeRelSize={5}
+
+                  nodeCanvasObject={(node, ctx, globalScale) => {
+                    const label = node.label || node.id;
+
+                    // Different node sizes by type
+                    const radius =
+                      node.type === "Disease"
+                        ? 10
+                        : node.type === "Target"
+                        ? 7
+                        : 4;
+
+                    // Draw node
+                    ctx.beginPath();
+                    ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI);
+
+                    ctx.fillStyle = node.color;
+                    ctx.fill();
+
+                    // Only display labels for Disease and Target nodes
+                    // Drug names appear when hovering over the node.
+                    if (node.type === "Drug") {
+                      return;
                     }
-                    nodeAutoColorBy="type"
-                    nodeCanvasObject={(node, ctx, globalScale) => {
-                      const label = node.label || node.id;
-                      const fontSize = 12 / globalScale;
 
-                      ctx.beginPath();
-                      ctx.arc(node.x, node.y, 7, 0, 2 * Math.PI);
-                      ctx.fillStyle = node.color;
-                      ctx.fill();
+                    const fontSize =
+                      node.type === "Disease"
+                        ? 13 / globalScale
+                        : 11 / globalScale;
 
-                      ctx.font = `${fontSize}px Sans-Serif`;
-                      ctx.textAlign = "center";
-                      ctx.textBaseline = "top";
-                      ctx.fillStyle = "#172033";
+                    ctx.font = `600 ${fontSize}px Sans-Serif`;
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "top";
+                    ctx.fillStyle = "#172033";
 
-                      ctx.fillText(
-                        label,
-                        node.x,
-                        node.y + 9
-                      );
-                    }}
-                    linkLabel={(link) => link.type}
-                    linkDirectionalArrowLength={5}
-                    linkDirectionalArrowRelPos={1}
-                    cooldownTicks={100}
-                    onNodeClick={(node) => {
-                      console.log("Selected node:", node);
-                    }}
-                  />
+                    ctx.fillText(
+                      label,
+                      node.x,
+                      node.y + radius + 3
+                    );
+                  }}
+
+                  linkLabel={(link) => link.type}
+
+                  linkDirectionalArrowLength={5}
+                  linkDirectionalArrowRelPos={1}
+
+                  linkWidth={(link) =>
+                    link.type === "ASSOCIATED_WITH" ? 2 : 1
+                  }
+
+                  d3VelocityDecay={0.35}
+                  cooldownTicks={150}
+
+                  onNodeClick={(node) => {
+                    setSelectedNode(node);
+                    setAnswer("");
+                    setError("");
+                  }}
+                />
               ) : (
                 <p>Loading knowledge graph...</p>
               )}
@@ -209,37 +248,64 @@ function App() {
             </div>
 
             <div className="answer">
-              {loading && (
-                <p>Querying the knowledge graph...</p>
-              )}
-
-              {error && (
-                <p className="error">
-                  {error}
-                </p>
-              )}
-
-              {!loading && !error && answer && (
+              {selectedNode ? (
                 <>
                   <p className="question">
-                    {question}
+                    Selected {selectedNode.type}
                   </p>
 
-                  <p>{answer}</p>
-                </>
-              )}
+                  <h4>
+                    {selectedNode.label || selectedNode.id}
+                  </h4>
 
-              {!loading && !error && !answer && (
-                <>
-                  <p className="question">
-                    What drugs target APP?
+                  <p>
+                    <strong>Type:</strong> {selectedNode.type}
                   </p>
 
                   <p>
-                    Ask a question to retrieve grounded
-                    information from the biomedical
-                    knowledge graph.
+                    <strong>ID:</strong> {selectedNode.id}
                   </p>
+
+                  <p>
+                    Click another node in the knowledge graph
+                    to inspect it.
+                  </p>
+                </>
+              ) : (
+                <>
+                  {loading && (
+                    <p>Querying the knowledge graph...</p>
+                  )}
+
+                  {error && (
+                    <p className="error">
+                      {error}
+                    </p>
+                  )}
+
+                  {!loading && !error && answer && (
+                    <>
+                      <p className="question">
+                        {question}
+                      </p>
+
+                      <p>{answer}</p>
+                    </>
+                  )}
+
+                  {!loading && !error && !answer && (
+                    <>
+                      <p className="question">
+                        What drugs target APP?
+                      </p>
+
+                      <p>
+                        Ask a question to retrieve grounded
+                        information from the biomedical
+                        knowledge graph.
+                      </p>
+                    </>
+                  )}
                 </>
               )}
             </div>

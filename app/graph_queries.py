@@ -156,16 +156,27 @@ def get_graph_data(disease_id):
     OPTIONAL MATCH (d)-[:ASSOCIATED_WITH]->(t:Target)
     OPTIONAL MATCH (t)-[:TARGETED_BY]->(drug:Drug)
 
-    
-
     RETURN
         d,
         t,
         drug
     """
 
+    count_query = """
+    MATCH (d:Disease {id: $disease_id})
+    OPTIONAL MATCH (d)-[:ASSOCIATED_WITH]->(t:Target)
+    OPTIONAL MATCH (t)-[:TARGETED_BY]->(drug:Drug)
+    OPTIONAL MATCH (drug)-[:HAS_CLINICAL_TRIAL]->(trial:ClinicalTrial)
+
+    RETURN
+        count(DISTINCT t) AS target_count,
+        count(DISTINCT drug) AS drug_count,
+        count(DISTINCT trial) AS clinical_trial_count
+    """
+
     with get_driver() as driver:
         with driver.session() as session:
+
             result = session.run(
                 query,
                 disease_id=disease_id
@@ -178,7 +189,6 @@ def get_graph_data(disease_id):
                 disease = record["d"]
                 target = record["t"]
                 drug = record["drug"]
-                
 
                 if disease:
                     disease_id_value = disease["id"]
@@ -198,11 +208,12 @@ def get_graph_data(disease_id):
                         "type": "Target"
                     }
 
-                    links.append({
-                        "source": disease["id"],
-                        "target": target_id,
-                        "type": "ASSOCIATED_WITH"
-                    })
+                    if disease:
+                        links.append({
+                            "source": disease["id"],
+                            "target": target_id,
+                            "type": "ASSOCIATED_WITH"
+                        })
 
                 if drug:
                     drug_id = drug["id"]
@@ -220,59 +231,28 @@ def get_graph_data(disease_id):
                             "type": "TARGETED_BY"
                         })
 
-                
-
-                    
-
-                unique_links = {
-                    (
-                        link["source"],
-                        link["target"],
-                        link["type"]
-                    ): link
-                    for link in links
-                }
-
-                        count_result = session.run(
-            """
-            MATCH (d:Disease {id: $disease_id})
-            OPTIONAL MATCH (d)-[:ASSOCIATED_WITH]->(t:Target)
-            OPTIONAL MATCH (t)-[:TARGETED_BY]->(drug:Drug)
-            OPTIONAL MATCH (drug)-[:HAS_CLINICAL_TRIAL]->(trial:ClinicalTrial)
-
-            RETURN
-                count(DISTINCT t) AS target_count,
-                count(DISTINCT drug) AS drug_count,
-                count(DISTINCT trial) AS clinical_trial_count
-            """,
-            disease_id=disease_id
-        )
-
-        counts = count_result.single()
-
-                count_result = session.run(
-            """
-            MATCH (d:Disease {id: $disease_id})
-            OPTIONAL MATCH (d)-[:ASSOCIATED_WITH]->(t:Target)
-            OPTIONAL MATCH (t)-[:TARGETED_BY]->(drug:Drug)
-            OPTIONAL MATCH (drug)-[:HAS_CLINICAL_TRIAL]->(trial:ClinicalTrial)
-
-            RETURN
-                count(DISTINCT t) AS target_count,
-                count(DISTINCT drug) AS drug_count,
-                count(DISTINCT trial) AS clinical_trial_count
-            """,
-            disease_id=disease_id
-        )
-
-        counts = count_result.single()
-
-        return {
-            "nodes": list(nodes.values()),
-            "links": list(unique_links.values()),
-            "stats": {
-                "target_count": counts["target_count"],
-                "drug_count": counts["drug_count"],
-                "clinical_trial_count": counts["clinical_trial_count"]
+            unique_links = {
+                (
+                    link["source"],
+                    link["target"],
+                    link["type"]
+                ): link
+                for link in links
             }
-        }
+
+            count_result = session.run(
+                count_query,
+                disease_id=disease_id
+            )
+
+            counts = count_result.single()
+
+            return {
+                "nodes": list(nodes.values()),
+                "links": list(unique_links.values()),
+                "stats": {
+                    "target_count": counts["target_count"],
+                    "drug_count": counts["drug_count"],
+                    "clinical_trial_count": counts["clinical_trial_count"]
+                }
+            }
