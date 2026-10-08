@@ -256,3 +256,17 @@ def get_graph_data(disease_id):
                     "clinical_trial_count": counts["clinical_trial_count"]
                 }
             }
+
+def get_diseases():
+    query = """
+    MATCH (d:Disease)
+    RETURN
+        d.id AS id,
+        d.name AS name
+    ORDER BY d.name
+    """
+
+    with get_driver() as driver:
+        with driver.session() as session:
+            result = session.run(query)
+            return [record.data() for record in result]

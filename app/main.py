@@ -7,6 +7,7 @@ from app.graph_queries import (
     get_disease_knowledge,
     get_drug_knowledge,
     get_graph_data,
+    get_diseases,
 )
 from app.llm import generate_answer
 
@@ -35,6 +36,11 @@ def root():
     return {
         "message": "DrugGraph AI API is running"
     }
+
+
+@app.get("/api/diseases")
+def diseases():
+    return {"diseases": get_diseases()}
 
 
 @app.get("/api/disease/{disease_id}")

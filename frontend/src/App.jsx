@@ -2,12 +2,19 @@ import { useEffect, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
 import "./App.css";
 
+const API_BASE = "http://127.0.0.1:8000";
+
 function App() {
+  const [diseases, setDiseases] = useState([]);
+  const [selectedDisease, setSelectedDisease] = useState("MONDO_0004975");
+
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(false);
+  const [graphLoading, setGraphLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedNode, setSelectedNode] = useState(null);
+
   const [graphData, setGraphData] = useState({
     nodes: [],
     links: [],
@@ -18,11 +25,54 @@ function App() {
     },
   });
 
+  // Load available diseases
   useEffect(() => {
+    const loadDiseases = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/diseases`);
+
+        if (!response.ok) {
+          throw new Error("Failed to load diseases.");
+        }
+
+        const data = await response.json();
+
+        setDiseases(data.diseases || []);
+
+        // Keep Alzheimer as the initial selection if available.
+        if (
+          data.diseases?.some(
+            (disease) => disease.id === "MONDO_0004975"
+          )
+        ) {
+          setSelectedDisease("MONDO_0004975");
+        } else if (data.diseases?.length > 0) {
+          setSelectedDisease(data.diseases[0].id);
+        }
+      } catch (err) {
+        console.error("Disease loading error:", err);
+        setError("Could not load available diseases.");
+      }
+    };
+
+    loadDiseases();
+  }, []);
+
+  // Load graph whenever the selected disease changes
+  useEffect(() => {
+    if (!selectedDisease) {
+      return;
+    }
+
     const loadGraph = async () => {
+      setGraphLoading(true);
+      setError("");
+      setAnswer("");
+      setSelectedNode(null);
+
       try {
         const response = await fetch(
-          "http://127.0.0.1:8000/api/graph/MONDO_0004975"
+          `${API_BASE}/api/graph/${selectedDisease}`
         );
 
         if (!response.ok) {
@@ -34,11 +84,35 @@ function App() {
         setGraphData(data);
       } catch (err) {
         console.error("Graph loading error:", err);
+
+        setGraphData({
+          nodes: [],
+          links: [],
+          stats: {
+            target_count: 0,
+            drug_count: 0,
+            clinical_trial_count: 0,
+          },
+        });
+
+        setError("Could not load the knowledge graph.");
+      } finally {
+        setGraphLoading(false);
       }
     };
 
     loadGraph();
-  }, []);
+  }, [selectedDisease]);
+
+  const selectedDiseaseName =
+    diseases.find(
+      (disease) => disease.id === selectedDisease
+    )?.name || "Loading...";
+
+  const handleDiseaseChange = (event) => {
+    setSelectedDisease(event.target.value);
+    setQuestion("");
+  };
 
   const askDrugGraph = async () => {
     if (!question.trim()) {
@@ -48,10 +122,11 @@ function App() {
     setLoading(true);
     setError("");
     setAnswer("");
+    setSelectedNode(null);
 
     try {
       const response = await fetch(
-        "http://127.0.0.1:8000/api/ask",
+        `${API_BASE}/api/ask`,
         {
           method: "POST",
           headers: {
@@ -59,7 +134,7 @@ function App() {
           },
           body: JSON.stringify({
             question: question,
-            disease_id: "MONDO_0004975",
+            disease_id: selectedDisease,
           }),
         }
       );
@@ -106,6 +181,52 @@ function App() {
             proteins, drugs, and clinical trials.
           </p>
 
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "12px",
+              marginBottom: "16px",
+              flexWrap: "wrap",
+            }}
+          >
+            <label
+              htmlFor="disease-selector"
+              style={{
+                fontWeight: "600",
+                color: "#172033",
+              }}
+            >
+              Disease
+            </label>
+
+            <select
+              id="disease-selector"
+              value={selectedDisease}
+              onChange={handleDiseaseChange}
+              disabled={graphLoading || diseases.length === 0}
+              style={{
+                padding: "10px 14px",
+                borderRadius: "8px",
+                border: "1px solid #d7dce5",
+                background: "#ffffff",
+                color: "#172033",
+                fontSize: "14px",
+                minWidth: "280px",
+                cursor: "pointer",
+              }}
+            >
+              {diseases.map((disease) => (
+                <option
+                  key={disease.id}
+                  value={disease.id}
+                >
+                  {disease.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <div className="search-box">
             <input
               type="text"
@@ -118,12 +239,12 @@ function App() {
                   askDrugGraph();
                 }
               }}
-              placeholder="Ask DrugGraph AI a question..."
+              placeholder={`Ask about ${selectedDiseaseName}...`}
             />
 
             <button
               onClick={askDrugGraph}
-              disabled={loading}
+              disabled={loading || graphLoading}
             >
               {loading ? "Asking..." : "Ask"}
             </button>
@@ -133,7 +254,7 @@ function App() {
         <section className="stats">
           <div className="stat-card">
             <span>Disease</span>
-            <strong>Alzheimer disease</strong>
+            <strong>{selectedDiseaseName}</strong>
           </div>
 
           <div className="stat-card">
@@ -148,7 +269,9 @@ function App() {
 
           <div className="stat-card">
             <span>Clinical Trials</span>
-            <strong>{graphData.stats.clinical_trial_count}</strong>
+            <strong>
+              {graphData.stats.clinical_trial_count}
+            </strong>
           </div>
         </section>
 
@@ -160,26 +283,22 @@ function App() {
             </div>
 
             <div className="graph-placeholder">
-              {graphData.nodes.length > 0 ? (
+              {graphLoading ? (
+                <p>Loading knowledge graph...</p>
+              ) : graphData.nodes.length > 0 ? (
                 <ForceGraph2D
                   graphData={graphData}
                   width={520}
                   height={300}
-
                   backgroundColor="#ffffff"
-
                   nodeLabel={(node) =>
                     `${node.type}: ${node.label || node.id}`
                   }
-
                   nodeAutoColorBy="type"
-
                   nodeRelSize={5}
-
                   nodeCanvasObject={(node, ctx, globalScale) => {
                     const label = node.label || node.id;
 
-                    // Different node sizes by type
                     const radius =
                       node.type === "Disease"
                         ? 10
@@ -187,15 +306,18 @@ function App() {
                         ? 7
                         : 4;
 
-                    // Draw node
                     ctx.beginPath();
-                    ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI);
+                    ctx.arc(
+                      node.x,
+                      node.y,
+                      radius,
+                      0,
+                      2 * Math.PI
+                    );
 
                     ctx.fillStyle = node.color;
                     ctx.fill();
 
-                    // Only display labels for Disease and Target nodes
-                    // Drug names appear when hovering over the node.
                     if (node.type === "Drug") {
                       return;
                     }
@@ -216,19 +338,14 @@ function App() {
                       node.y + radius + 3
                     );
                   }}
-
                   linkLabel={(link) => link.type}
-
                   linkDirectionalArrowLength={5}
                   linkDirectionalArrowRelPos={1}
-
                   linkWidth={(link) =>
                     link.type === "ASSOCIATED_WITH" ? 2 : 1
                   }
-
                   d3VelocityDecay={0.35}
                   cooldownTicks={150}
-
                   onNodeClick={(node) => {
                     setSelectedNode(node);
                     setAnswer("");
@@ -236,7 +353,7 @@ function App() {
                   }}
                 />
               ) : (
-                <p>Loading knowledge graph...</p>
+                <p>No graph data available.</p>
               )}
             </div>
           </div>
@@ -259,7 +376,8 @@ function App() {
                   </h4>
 
                   <p>
-                    <strong>Type:</strong> {selectedNode.type}
+                    <strong>Type:</strong>{" "}
+                    {selectedNode.type}
                   </p>
 
                   <p>
@@ -301,7 +419,7 @@ function App() {
 
                       <p>
                         Ask a question to retrieve grounded
-                        information from the biomedical
+                        information from the selected disease
                         knowledge graph.
                       </p>
                     </>

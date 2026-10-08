@@ -17,14 +17,17 @@ OPEN_TARGETS_URL = (
 
 
 DISEASES = [
-    {
-        "id": "MONDO_0004975",
-        "name": "Alzheimer disease",
-    },
-    {
-        "id": "MONDO_0005180",
-        "name": "Parkinson disease",
-    },
+    {"id": "MONDO_0004975", "name": "Alzheimer disease"},
+    {"id": "MONDO_0005180", "name": "Parkinson disease"},
+    {"id": "MONDO_0004976", "name": "Amyotrophic lateral sclerosis"},
+    {"id": "MONDO_0007739", "name": "Huntington disease"},
+    {"id": "MONDO_0005314", "name": "Relapsing-remitting multiple sclerosis"},
+    {"id": "MONDO_0005284", "name": "Chronic progressive multiple sclerosis"},
+    {"id": "MONDO_0005148", "name": "Type 2 diabetes mellitus"},
+    {"id": "MONDO_0007254", "name": "Breast cancer"},
+    {"id": "MONDO_0008903", "name": "Lung cancer"},
+    {"id": "MONDO_0005575", "name": "Colorectal cancer"},
+    {"id": "MONDO_0008315", "name": "Prostate cancer"},
 ]
 
 

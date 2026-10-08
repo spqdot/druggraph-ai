@@ -11,7 +11,6 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
 OPEN_TARGETS_URL = "https://api.platform.opentargets.org/api/v4/graphql"
 
-ALZHEIMER_ID = "MONDO_0004975"
 
 QUERY = """
 query TargetTrials($ensemblId: String!) {
@@ -71,6 +70,28 @@ def get_targets_from_neo4j():
     return targets
 
 
+def get_disease_ids_from_neo4j():
+    driver = GraphDatabase.driver(
+        NEO4J_URI,
+        auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
+    )
+
+    with driver.session() as session:
+        result = session.run("""
+            MATCH (d:Disease)
+            RETURN d.id AS id
+        """)
+
+        disease_ids = {
+            record["id"]
+            for record in result
+        }
+
+    driver.close()
+
+    return disease_ids
+
+
 def get_trials_from_open_targets(ensembl_id):
     response = requests.post(
         OPEN_TARGETS_URL,
@@ -102,34 +123,24 @@ def get_trials_from_open_targets(ensembl_id):
     ).get("rows", [])
 
 
-def is_alzheimer_candidate(row):
+def get_matching_disease_ids(row, valid_disease_ids):
+    matched_ids = []
+
     for item in row.get("diseases", []):
         disease = item.get("disease")
 
-        if disease and disease.get("id") == ALZHEIMER_ID:
-            return True
+        if not disease:
+            continue
 
-    return False
+        disease_id = disease.get("id")
 
+        if disease_id in valid_disease_ids:
+            matched_ids.append(disease_id)
 
-def looks_like_alzheimer_trial(report):
-    title = (
-        report.get("title") or
-        report.get("trialOfficialTitle") or
-        ""
-    ).lower()
-
-    keywords = [
-        "alzheimer",
-        "alzheimer's",
-        "alzheimer’s",
-        "dominantly inherited alzheimer"
-    ]
-
-    return any(keyword in title for keyword in keywords)
+    return matched_ids
 
 
-def save_clinical_trial(drug_id, report):
+def save_clinical_trial(drug_id, report, disease_ids):
 
     driver = GraphDatabase.driver(
         NEO4J_URI,
@@ -157,7 +168,7 @@ def save_clinical_trial(drug_id, report):
             """,
             drug_id=drug_id,
             trial_id=report["id"],
-            provider=report["provider"],
+            provider=report.get("provider"),
             title=report.get("title"),
             start_date=report.get("trialStartDate"),
             clinical_stage=report.get("clinicalStage"),
@@ -176,9 +187,16 @@ def main():
 
     targets = get_targets_from_neo4j()
 
-    print(f"Targets found: {len(targets)}\n")
+    print(f"Targets found: {len(targets)}")
+
+    print("Fetching disease IDs from Neo4j...\n")
+
+    valid_disease_ids = get_disease_ids_from_neo4j()
+
+    print(f"Diseases found: {len(valid_disease_ids)}\n")
 
     total_trials = 0
+    total_candidates = 0
 
     for target in targets:
 
@@ -199,15 +217,19 @@ def main():
             if not drug:
                 continue
 
-            # Only candidates associated with Alzheimer disease
-            if not is_alzheimer_candidate(row):
+            matched_disease_ids = get_matching_disease_ids(
+                row,
+                valid_disease_ids
+            )
+
+            if not matched_disease_ids:
                 continue
 
             candidate_count += 1
+            total_candidates += 1
 
             for report in row.get("clinicalReports", []):
 
-                # Only ClinicalTrials.gov / AACT records
                 if report.get("provider") != "AACT":
                     continue
 
@@ -216,27 +238,26 @@ def main():
                 if not trial_id.lower().startswith("nct"):
                     continue
 
-                # Secondary title-level filter
-                if not looks_like_alzheimer_trial(report):
-                    continue
-
                 save_clinical_trial(
                     drug["id"],
-                    report
+                    report,
+                    matched_disease_ids
                 )
 
                 trial_count += 1
                 total_trials += 1
 
         print(
-            f"  Alzheimer candidates: {candidate_count}"
+            f"  Disease-associated candidates: {candidate_count}"
         )
+
         print(
-            f"  Alzheimer clinical trials: {trial_count}"
+            f"  Clinical trials: {trial_count}"
         )
 
     print()
     print("✅ Clinical Trial loading complete!")
+    print(f"Disease-associated candidates processed: {total_candidates}")
     print(f"Clinical trial records processed: {total_trials}")
 
 
