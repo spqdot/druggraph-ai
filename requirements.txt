@@ -5,3 +5,4 @@ python-dotenv
 openai
 requests
 pandas
+gremlinpython==3.7.3

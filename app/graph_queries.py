@@ -1,272 +1,418 @@
+
 import os
+from collections import defaultdict
 
 from dotenv import load_dotenv
-from neo4j import GraphDatabase
-
+from gremlin_python.driver import client, serializer
 
 load_dotenv()
 
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+COSMOS_GREMLIN_ENDPOINT = os.getenv("COSMOS_GREMLIN_ENDPOINT")
+COSMOS_DATABASE = os.getenv("COSMOS_DATABASE", "druggraphdb")
+COSMOS_GRAPH = os.getenv("COSMOS_GRAPH", "druggraph")
+COSMOS_GREMLIN_PASSWORD = os.getenv("COSMOS_GREMLIN_PASSWORD")
+PARTITION_KEY = "druggraph"
 
 
 def get_driver():
-    return GraphDatabase.driver(
-        NEO4J_URI,
-        auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
+    if not COSMOS_GREMLIN_ENDPOINT or not COSMOS_GREMLIN_PASSWORD:
+        raise RuntimeError("Missing Cosmos DB Gremlin configuration.")
+
+    return client.Client(
+        COSMOS_GREMLIN_ENDPOINT,
+        "g",
+        username=f"/dbs/{COSMOS_DATABASE}/colls/{COSMOS_GRAPH}",
+        password=COSMOS_GREMLIN_PASSWORD,
+        message_serializer=serializer.GraphSONSerializersV2d0(),
     )
 
 
+def _submit(c, query, bindings=None):
+    if bindings:
+        return c.submit(query, bindings).all().result()
+    return c.submit(query).all().result()
+
+
+def _first(value):
+    return value[0] if isinstance(value, list) and value else (
+        None if isinstance(value, list) else value
+    )
+
+
+def _vertex(raw):
+    return {key: _first(value) for key, value in raw.items()}
+
+
+def _vertices(c, label):
+    query = (
+        f"g.V().has('partitionKey', pk).hasLabel('{label}')"
+        ".valueMap(true)"
+    )
+    return [
+        _vertex(row)
+        for row in _submit(c, query, {"pk": PARTITION_KEY})
+    ]
+
+
+def _edges(c, label):
+    query = (
+        f"g.E().hasLabel('{label}')"
+        ".project('source','target')"
+        ".by(outV().id()).by(inV().id())"
+    )
+    return _submit(c, query)
+
+def _disease_targets(c, disease_id):
+    query = (
+        "g.V().has('partitionKey', pk).hasLabel('Disease')"
+        ".has('id', did).out('ASSOCIATED_WITH')"
+        ".hasLabel('Target').valueMap(true)"
+    )
+    rows = _submit(c, query, {"pk": PARTITION_KEY, "did": disease_id})
+    return [_vertex(row) for row in rows]
+
+
+def _target_proteins(c, target_id):
+    query = (
+        "g.V().has('partitionKey', pk).has('id', tid)"
+        ".hasLabel('Target').out('HAS_PROTEIN')"
+        ".hasLabel('Protein').valueMap(true)"
+    )
+    rows = _submit(c, query, {"pk": PARTITION_KEY, "tid": target_id})
+    return [_vertex(row) for row in rows]
+
+
+def _target_drugs(c, target_id):
+    query = (
+        "g.V().has('partitionKey', pk).has('id', tid)"
+        ".hasLabel('Target').out('TARGETED_BY')"
+        ".hasLabel('Drug').valueMap(true)"
+    )
+    rows = _submit(c, query, {"pk": PARTITION_KEY, "tid": target_id})
+    return [_vertex(row) for row in rows]
+
+
+def _drug_trials(c, drug_id):
+    query = (
+        "g.V().has('partitionKey', pk).has('id', did)"
+        ".hasLabel('Drug').out('HAS_CLINICAL_TRIAL')"
+        ".hasLabel('ClinicalTrial').valueMap(true)"
+    )
+    rows = _submit(c, query, {"pk": PARTITION_KEY, "did": drug_id})
+    return [_vertex(row) for row in rows]
+
+def _connected(vertices, edges, source_id, edge_type, target_label=None):
+    vertices = {}
+    for label in ("Disease", "Target", "Protein", "Drug", "ClinicalTrial"):
+        for vertex in _vertices(c, label):
+            vertices[vertex["id"]] = vertex
+
+    edges = defaultdict(list)
+    for label in (
+        "ASSOCIATED_WITH",
+        "HAS_PROTEIN",
+        "TARGETED_BY",
+        "HAS_CLINICAL_TRIAL",
+    ):
+        for edge in _edges(c, label):
+            edges[(edge["source"], label)].append(edge["target"])
+
+    return vertices, edges
+
+
+def _connected(vertices, edges, source_id, edge_type, target_label=None):
+    results = []
+    for target_id in edges.get((source_id, edge_type), []):
+        vertex = vertices.get(target_id)
+        if vertex and (
+            target_label is None or vertex.get("label") == target_label
+        ):
+            results.append(vertex)
+    return results
+
+
+def _protein_records(vertices, edges, target_id):
+    return [
+        {"id": p.get("id"), "source": p.get("source")}
+        for p in _connected(vertices, edges, target_id, "HAS_PROTEIN", "Protein")
+    ]
+
+
+def _trial_records(vertices, edges, drug_id):
+    return [
+        {
+            "id": t.get("id"),
+            "phase": t.get("phase"),
+            "status": t.get("overall_status"),
+            "title": t.get("title") or t.get("official_title"),
+        }
+        for t in _connected(
+            vertices, edges, drug_id, "HAS_CLINICAL_TRIAL", "ClinicalTrial"
+        )
+    ]
+
+
+def get_diseases():
+    c = get_driver()
+    try:
+        return sorted(
+            [
+                {"id": d.get("id"), "name": d.get("name")}
+                for d in _vertices(c, "Disease")
+            ],
+            key=lambda item: item.get("name") or "",
+        )
+    finally:
+        c.close()
+
+
+
 def get_disease_knowledge(disease_id):
-    query = """
-    MATCH (d:Disease {id: $disease_id})
-    OPTIONAL MATCH (d)-[:ASSOCIATED_WITH]->(t:Target)
+    c = get_driver()
+    try:
+        disease_rows = _submit(
+            c,
+            "g.V().has('partitionKey', pk).hasLabel('Disease')"
+            ".has('id', did).valueMap(true)",
+            {"pk": PARTITION_KEY, "did": disease_id},
+        )
+        if not disease_rows:
+            return []
 
-    OPTIONAL MATCH (t)-[:HAS_PROTEIN]->(p:Protein)
+        disease = _vertex(disease_rows[0])
+        targets = _disease_targets(c, disease_id)
+        results = []
 
-    OPTIONAL MATCH (t)-[:TARGETED_BY]->(drug:Drug)
+        for target in targets:
+            proteins = _target_proteins(c, target["id"])
+            drugs = _target_drugs(c, target["id"])
 
-    OPTIONAL MATCH (drug)-[:HAS_CLINICAL_TRIAL]->(trial:ClinicalTrial)
+            drug_records = []
+            clinical_trials = []
 
-    RETURN
-        d.id AS disease_id,
-        d.name AS disease,
-        t.id AS target_id,
-        t.symbol AS target,
-        t.name AS target_name,
-        collect(DISTINCT {
-            id: p.id,
-            source: p.source
-        }) AS proteins,
-        collect(DISTINCT CASE
-            WHEN drug.id IS NOT NULL THEN {
-                id: drug.id,
-                name: drug.name,
-                type: drug.drug_type,
-                maximum_stage: drug.maximum_clinical_stage
-            }
-        END) AS drugs,
-        collect(DISTINCT CASE
-            WHEN trial.id IS NOT NULL THEN {
-                id: trial.id,
-                phase: trial.phase,
-                status: trial.overall_status,
-                title: trial.title
-            }
-        END) AS clinical_trials
-    ORDER BY target
-    """
+            for drug in drugs:
+                drug_records.append({
+                    "id": drug.get("id"),
+                    "name": drug.get("name"),
+                    "type": drug.get("drug_type"),
+                    "maximum_stage": drug.get("maximum_clinical_stage"),
+                })
+                clinical_trials.extend([
+                    {
+                        "id": trial.get("id"),
+                        "phase": trial.get("phase"),
+                        "status": trial.get("overall_status"),
+                        "title": trial.get("title") or trial.get("official_title"),
+                    }
+                    for trial in _drug_trials(c, drug["id"])
+                ])
 
-    with get_driver() as driver:
-        with driver.session() as session:
-            result = session.run(
-                query,
-                disease_id=disease_id
-            )
+            results.append({
+                "disease_id": disease.get("id"),
+                "disease": disease.get("name"),
+                "target_id": target.get("id"),
+                "target": target.get("symbol") or target.get("name"),
+                "target_name": target.get("name"),
+                "proteins": [
+                    {"id": p.get("id"), "source": p.get("source")}
+                    for p in proteins
+                ],
+                "drugs": drug_records,
+                "clinical_trials": clinical_trials,
+            })
 
-            return [record.data() for record in result]
+        return results
+    finally:
+        c.close()
+
 
 
 def get_drug_knowledge(disease_id, drug_name):
-    query = """
-    MATCH (d:Disease {id: $disease_id})
-          -[:ASSOCIATED_WITH]->(t:Target)
-          -[:TARGETED_BY]->(drug:Drug)
-    WHERE toLower(drug.name) = toLower($drug_name)
+    c = get_driver()
+    try:
+        disease_rows = _submit(
+            c,
+            "g.V().has('partitionKey', pk).hasLabel('Disease')"
+            ".has('id', did).valueMap(true)",
+            {"pk": PARTITION_KEY, "did": disease_id},
+        )
+        if not disease_rows:
+            return []
 
-    OPTIONAL MATCH (t)-[:HAS_PROTEIN]->(p:Protein)
+        disease = _vertex(disease_rows[0])
+        results = []
 
-    OPTIONAL MATCH (drug)-[:HAS_CLINICAL_TRIAL]->(trial:ClinicalTrial)
+        for target in _disease_targets(c, disease_id):
+            drugs = _target_drugs(c, target["id"])
 
-    RETURN
-        d.id AS disease_id,
-        d.name AS disease,
-        t.id AS target_id,
-        t.symbol AS target,
-        t.name AS target_name,
-        drug.id AS drug_id,
-        drug.name AS drug,
-        drug.drug_type AS drug_type,
-        drug.maximum_clinical_stage AS maximum_clinical_stage,
-        collect(DISTINCT CASE
-            WHEN p.id IS NOT NULL THEN {
-                id: p.id,
-                source: p.source
-            }
-        END) AS proteins,
-        collect(DISTINCT CASE
-            WHEN trial.id IS NOT NULL THEN {
-                id: trial.id,
-                phase: trial.phase,
-                status: trial.overall_status,
-                title: trial.title
-            }
-        END) AS clinical_trials
-    ORDER BY target
-    """
+            for drug in drugs:
+                if (drug.get("name") or "").casefold() != drug_name.casefold():
+                    continue
 
-    with get_driver() as driver:
-        with driver.session() as session:
-            result = session.run(
-                query,
-                disease_id=disease_id,
-                drug_name=drug_name
-            )
+                proteins = _target_proteins(c, target["id"])
+                trials = _drug_trials(c, drug["id"])
 
-            return [record.data() for record in result]
+                results.append({
+                    "disease_id": disease.get("id"),
+                    "disease": disease.get("name"),
+                    "target_id": target.get("id"),
+                    "target": target.get("symbol") or target.get("name"),
+                    "target_name": target.get("name"),
+                    "drug_id": drug.get("id"),
+                    "drug": drug.get("name"),
+                    "drug_type": drug.get("drug_type"),
+                    "maximum_clinical_stage": drug.get(
+                        "maximum_clinical_stage"
+                    ),
+                    "proteins": [
+                        {"id": p.get("id"), "source": p.get("source")}
+                        for p in proteins
+                    ],
+                    "clinical_trials": [
+                        {
+                            "id": trial.get("id"),
+                            "phase": trial.get("phase"),
+                            "status": trial.get("overall_status"),
+                            "title": trial.get("title")
+                            or trial.get("official_title"),
+                        }
+                        for trial in trials
+                    ],
+                })
+
+        return results
+    finally:
+        c.close()
+
+
 
 
 def get_drug_trials(disease_id, drug_name):
-    query = """
-    MATCH (d:Disease {id: $disease_id})
-          -[:ASSOCIATED_WITH]->(t:Target)
-          -[:TARGETED_BY]->(drug:Drug)
-    WHERE toLower(drug.name) = toLower($drug_name)
+    c = get_driver()
+    try:
+        disease_rows = _submit(
+            c,
+            "g.V().has('partitionKey', pk).hasLabel('Disease')"
+            ".has('id', did).valueMap(true)",
+            {"pk": PARTITION_KEY, "did": disease_id},
+        )
+        if not disease_rows:
+            return []
 
-    MATCH (drug)-[:HAS_CLINICAL_TRIAL]->(trial:ClinicalTrial)
+        disease = _vertex(disease_rows[0])
+        results = []
 
-    RETURN DISTINCT
-        d.name AS disease,
-        t.symbol AS target,
-        drug.id AS drug_id,
-        drug.name AS drug,
-        trial.id AS trial_id,
-        trial.phase AS phase,
-        trial.overall_status AS status,
-        trial.title AS title,
-        trial.start_date AS start_date
-    ORDER BY trial.phase, trial.id
-    """
+        for target in _disease_targets(c, disease_id):
+            for drug in _target_drugs(c, target["id"]):
+                if (drug.get("name") or "").casefold() != drug_name.casefold():
+                    continue
 
-    with get_driver() as driver:
-        with driver.session() as session:
-            result = session.run(
-                query,
-                disease_id=disease_id,
-                drug_name=drug_name
-            )
+                for trial in _drug_trials(c, drug["id"]):
+                    results.append({
+                        "disease": disease.get("name"),
+                        "target": target.get("symbol") or target.get("name"),
+                        "drug_id": drug.get("id"),
+                        "drug": drug.get("name"),
+                        "trial_id": trial.get("id"),
+                        "phase": trial.get("phase"),
+                        "status": trial.get("overall_status"),
+                        "title": trial.get("title")
+                        or trial.get("official_title"),
+                        "start_date": trial.get("start_date"),
+                    })
 
-            return [record.data() for record in result]
+        return sorted(
+            results,
+            key=lambda row: (
+                row.get("phase") or "",
+                row.get("trial_id") or "",
+            ),
+        )
+    finally:
+        c.close()
+
+
 
 
 def get_graph_data(disease_id):
-    query = """
-    MATCH (d:Disease {id: $disease_id})
-    OPTIONAL MATCH (d)-[:ASSOCIATED_WITH]->(t:Target)
-    OPTIONAL MATCH (t)-[:TARGETED_BY]->(drug:Drug)
+    c = get_driver()
+    try:
+        disease_rows = _submit(
+            c,
+            "g.V().has('partitionKey', pk).hasLabel('Disease')"
+            ".has('id', did).valueMap(true)",
+            {"pk": PARTITION_KEY, "did": disease_id},
+        )
 
-    RETURN
-        d,
-        t,
-        drug
-    """
-
-    count_query = """
-    MATCH (d:Disease {id: $disease_id})
-    OPTIONAL MATCH (d)-[:ASSOCIATED_WITH]->(t:Target)
-    OPTIONAL MATCH (t)-[:TARGETED_BY]->(drug:Drug)
-    OPTIONAL MATCH (drug)-[:HAS_CLINICAL_TRIAL]->(trial:ClinicalTrial)
-
-    RETURN
-        count(DISTINCT t) AS target_count,
-        count(DISTINCT drug) AS drug_count,
-        count(DISTINCT trial) AS clinical_trial_count
-    """
-
-    with get_driver() as driver:
-        with driver.session() as session:
-
-            result = session.run(
-                query,
-                disease_id=disease_id
-            )
-
-            nodes = {}
-            links = []
-
-            for record in result:
-                disease = record["d"]
-                target = record["t"]
-                drug = record["drug"]
-
-                if disease:
-                    disease_id_value = disease["id"]
-
-                    nodes[disease_id_value] = {
-                        "id": disease_id_value,
-                        "label": disease.get("name"),
-                        "type": "Disease"
-                    }
-
-                if target:
-                    target_id = target["id"]
-
-                    nodes[target_id] = {
-                        "id": target_id,
-                        "label": target.get("symbol"),
-                        "type": "Target"
-                    }
-
-                    if disease:
-                        links.append({
-                            "source": disease["id"],
-                            "target": target_id,
-                            "type": "ASSOCIATED_WITH"
-                        })
-
-                if drug:
-                    drug_id = drug["id"]
-
-                    nodes[drug_id] = {
-                        "id": drug_id,
-                        "label": drug.get("name"),
-                        "type": "Drug"
-                    }
-
-                    if target:
-                        links.append({
-                            "source": target["id"],
-                            "target": drug_id,
-                            "type": "TARGETED_BY"
-                        })
-
-            unique_links = {
-                (
-                    link["source"],
-                    link["target"],
-                    link["type"]
-                ): link
-                for link in links
-            }
-
-            count_result = session.run(
-                count_query,
-                disease_id=disease_id
-            )
-
-            counts = count_result.single()
-
+        if not disease_rows:
             return {
-                "nodes": list(nodes.values()),
-                "links": list(unique_links.values()),
+                "nodes": [],
+                "links": [],
                 "stats": {
-                    "target_count": counts["target_count"],
-                    "drug_count": counts["drug_count"],
-                    "clinical_trial_count": counts["clinical_trial_count"]
-                }
+                    "target_count": 0,
+                    "drug_count": 0,
+                    "clinical_trial_count": 0,
+                },
             }
 
-def get_diseases():
-    query = """
-    MATCH (d:Disease)
-    RETURN
-        d.id AS id,
-        d.name AS name
-    ORDER BY d.name
-    """
+        disease = _vertex(disease_rows[0])
+        nodes = []
+        links = []
+        included = set()
 
-    with get_driver() as driver:
-        with driver.session() as session:
-            result = session.run(query)
-            return [record.data() for record in result]
+        def add_node(vertex):
+            vertex_id = vertex["id"]
+            if vertex_id not in included:
+                nodes.append({
+                    "id": vertex_id,
+                    "label": (
+                        vertex.get("name")
+                        or vertex.get("symbol")
+                        or vertex_id
+                    ),
+                    "type": vertex.get("label"),
+                })
+                included.add(vertex_id)
+
+        def add_link(source, target, edge_type):
+            links.append({
+                "source": source,
+                "target": target,
+                "type": edge_type,
+            })
+
+        add_node(disease)
+
+        targets = _disease_targets(c, disease_id)
+        drugs_by_id = {}
+
+        for target in targets:
+            add_node(target)
+            add_link(disease_id, target["id"], "ASSOCIATED_WITH")
+
+            for drug in _target_drugs(c, target["id"]):
+                drugs_by_id[drug["id"]] = drug
+                add_node(drug)
+                add_link(target["id"], drug["id"], "TARGETED_BY")
+
+        trials_by_id = {}
+
+        for drug in drugs_by_id.values():
+            for trial in _drug_trials(c, drug["id"]):
+                trials_by_id[trial["id"]] = trial
+                add_node(trial)
+                add_link(
+                    drug["id"], trial["id"], "HAS_CLINICAL_TRIAL"
+                )
+
+        return {
+            "nodes": nodes,
+            "links": links,
+            "stats": {
+                "target_count": len(targets),
+                "drug_count": len(drugs_by_id),
+                "clinical_trial_count": len(trials_by_id),
+            },
+        }
+    finally:
+        c.close()
