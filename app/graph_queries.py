@@ -1,17 +1,24 @@
 
 import os
+import logging
+import time
 from collections import defaultdict
 
 from dotenv import load_dotenv
 from gremlin_python.driver import client, serializer
+from gremlin_python.driver.protocol import GremlinServerError
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 COSMOS_GREMLIN_ENDPOINT = os.getenv("COSMOS_GREMLIN_ENDPOINT")
 COSMOS_DATABASE = os.getenv("COSMOS_DATABASE", "druggraphdb")
 COSMOS_GRAPH = os.getenv("COSMOS_GRAPH", "druggraph")
 COSMOS_GREMLIN_PASSWORD = os.getenv("COSMOS_GREMLIN_PASSWORD")
 PARTITION_KEY = "druggraph"
+MAX_QUERY_ATTEMPTS = 3
+RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 def get_driver():
@@ -28,9 +35,28 @@ def get_driver():
 
 
 def _submit(c, query, bindings=None):
-    if bindings:
-        return c.submit(query, bindings).all().result()
-    return c.submit(query).all().result()
+    for attempt in range(1, MAX_QUERY_ATTEMPTS + 1):
+        try:
+            if bindings:
+                return c.submit(query, bindings).all().result()
+            return c.submit(query).all().result()
+        except GremlinServerError as exc:
+            if (
+                exc.status_code not in RETRYABLE_STATUS_CODES
+                or attempt == MAX_QUERY_ATTEMPTS
+            ):
+                raise
+
+            delay = 0.25 * (2 ** (attempt - 1))
+            logger.warning(
+                "Retrying Cosmos Gremlin query after status=%s "
+                "attempt=%s/%s delay_seconds=%.2f",
+                exc.status_code,
+                attempt,
+                MAX_QUERY_ATTEMPTS,
+                delay,
+            )
+            time.sleep(delay)
 
 
 def _first(value):
