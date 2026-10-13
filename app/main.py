@@ -1,8 +1,10 @@
+import logging
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
-from app.context_builder import build_drug_context
+from app.context_builder import build_disease_context, build_drug_context
 from app.graph_queries import (
     get_disease_knowledge,
     get_drug_knowledge,
@@ -10,6 +12,9 @@ from app.graph_queries import (
     get_diseases,
 )
 from app.llm import generate_answer
+
+
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(
@@ -96,88 +101,121 @@ class AskRequest(BaseModel):
     disease_id: str = "MONDO_0004975"
     drug_name: str | None = None
 
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, value: str) -> str:
+        question = value.strip()
+        if not question:
+            raise ValueError("Question must not be empty.")
+        return question
+
 
 @app.post("/api/ask")
 def ask_knowledge_graph(request: AskRequest):
-    if request.drug_name:
-        data = get_drug_knowledge(
+    try:
+        if request.drug_name:
+            data = get_drug_knowledge(
+                request.disease_id,
+                request.drug_name
+            )
+
+            if not data:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Drug not found: {request.drug_name}"
+                )
+
+            context = build_drug_context(data)
+
+            targets = sorted({
+                item.get("target")
+                for item in data
+                if item.get("target")
+            })
+
+            protein_ids = {
+                protein.get("id")
+                for item in data
+                for protein in item.get("proteins", [])
+                if protein and protein.get("id")
+            }
+
+            trial_ids = {
+                trial.get("id")
+                for item in data
+                for trial in item.get("clinical_trials", [])
+                if trial and trial.get("id")
+            }
+
+            sources = {
+                "disease": data[0].get("disease"),
+                "target": targets,
+                "drug": data[0].get("drug"),
+                "drug_id": data[0].get("drug_id"),
+                "protein_count": len(protein_ids),
+                "clinical_trial_count": len(trial_ids),
+            }
+
+        else:
+            data = get_disease_knowledge(request.disease_id)
+
+            if not data:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Disease not found: {request.disease_id}"
+                )
+
+            context = build_disease_context(data)
+            drug_ids = {
+                drug.get("id")
+                for item in data
+                for drug in item.get("drugs", [])
+                if drug.get("id")
+            }
+            trial_ids = {
+                trial.get("id")
+                for item in data
+                for trial in item.get("clinical_trials", [])
+                if trial.get("id")
+            }
+            sources = {
+                "disease": data[0].get("disease"),
+                "disease_id": request.disease_id,
+                "target_count": len(data),
+                "drug_count": len(drug_ids),
+                "clinical_trial_count": len(trial_ids),
+            }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Knowledge graph retrieval failed for disease_id=%s",
             request.disease_id,
-            request.drug_name
         )
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge graph retrieval is temporarily unavailable.",
+        ) from exc
 
-        if not data:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Drug not found: {request.drug_name}"
-            )
-
-        context = build_drug_context(data)
-
-        targets = sorted({
-            item.get("target")
-            for item in data
-            if item.get("target")
-        })
-
-        protein_ids = {
-            protein.get("id")
-            for item in data
-            for protein in item.get("proteins", [])
-            if protein and protein.get("id")
-        }
-
-        trial_ids = {
-            trial.get("id")
-            for item in data
-            for trial in item.get("clinical_trials", [])
-            if trial and trial.get("id")
-        }
-
-        sources = {
-            "disease": data[0].get("disease"),
-            "target": targets,
-            "drug": data[0].get("drug"),
-            "drug_id": data[0].get("drug_id"),
-            "protein_count": len(protein_ids),
-            "clinical_trial_count": len(trial_ids)
-        }
-
-    else:
-        data = get_disease_knowledge(request.disease_id)
-
-        if not data:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Disease not found: {request.disease_id}"
-            )
-
-        context_parts = []
-
-        for item in data:
-            context_parts.append(
-                f"""
-Disease: {item.get('disease')}
-Target: {item.get('target')}
-Target name: {item.get('target_name')}
-Drugs: {item.get('drugs')}
-Clinical trials: {len([
-    x for x in item.get('clinical_trials', [])
-    if x.get('id')
-])}
-"""
-            )
-
-        context = "\n".join(context_parts)
-
-        sources = {
-            "disease": request.disease_id,
-            "target_count": len(data)
-        }
-
-    answer = generate_answer(
-        request.question,
-        context
+    logger.info(
+        "RAG request disease_id=%s targets=%s drugs=%s trials=%s context_chars=%s",
+        request.disease_id,
+        sources.get("target_count", len(sources.get("target", []))),
+        sources.get("drug_count", 1 if request.drug_name else 0),
+        sources["clinical_trial_count"],
+        len(context),
     )
+    try:
+        answer = generate_answer(request.question, context)
+    except Exception as exc:
+        logger.exception(
+            "LLM answer generation failed for disease_id=%s",
+            request.disease_id,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Answer generation is temporarily unavailable.",
+        ) from exc
 
     return {
         "question": request.question,
