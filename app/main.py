@@ -34,6 +34,7 @@ app.add_middleware(
         "http://127.0.0.1:5175",
         "http://localhost:5176",
         "http://127.0.0.1:5176",
+        "https://red-pebble-06cc9b003.6.azurestaticapps.net",
     ],
     allow_credentials=True,
     allow_methods=["*"],
