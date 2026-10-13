@@ -64,6 +64,8 @@ function App() {
       return;
     }
 
+    const controller = new AbortController();
+
     const loadGraph = async () => {
       setGraphLoading(true);
       setError("");
@@ -72,7 +74,8 @@ function App() {
 
       try {
         const response = await fetch(
-          `${API_BASE}/api/graph/${selectedDisease}`
+          `${API_BASE}/api/graph/${selectedDisease}`,
+          { signal: controller.signal }
         );
 
         if (!response.ok) {
@@ -80,28 +83,37 @@ function App() {
         }
 
         const data = await response.json();
+        if (!controller.signal.aborted) {
+          setGraphData(data);
+        }
+        if (err.name === "AbortError") return;
 
-        setGraphData(data);
       } catch (err) {
         console.error("Graph loading error:", err);
 
-        setGraphData({
-          nodes: [],
-          links: [],
-          stats: {
-            target_count: 0,
-            drug_count: 0,
-            clinical_trial_count: 0,
-          },
-        });
+        if (!controller.signal.aborted) {
+          setGraphData({
+            nodes: [],
+            links: [],
+            stats: {
+              target_count: 0,
+              drug_count: 0,
+              clinical_trial_count: 0,
+            },
+          });
 
-        setError("Could not load the knowledge graph.");
+          setError("Could not load the knowledge graph.");
+        }
       } finally {
-        setGraphLoading(false);
+        if (!controller.signal.aborted) {
+          setGraphLoading(false);
+        }
       }
     };
 
     loadGraph();
+
+    return () => controller.abort();
   }, [selectedDisease]);
 
   const selectedDiseaseName =
